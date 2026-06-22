@@ -1,0 +1,701 @@
+#
+# Hiconics HEC2-S5.0Hr2
+#
+# Register map discovered via pysolarmanv5 scanning - June 2026
+# Logger: Solarman LSW-5, SN: 3576328068, IP: 192.168.1.187, Slave ID: 2
+#
+# Data blocks:
+#   0x4Fxx - 16-bit signed integers (grid, load, DC bus)
+#   0x28xx - 32-bit IEEE 754 floats (battery, BMS, temp)
+#            word order: [lo_reg, hi_reg]
+#            (parser reads lo first, shifts hi << 16, packs as >I, unpacks as >f)
+#   0x2Bxx - 16-bit unsigned integers (cell voltages x0.001, SoH x0.1)
+#
+# Validation: 31 of 39 sensors match Solarman API within tolerance (June 2026)
+#   - Validated against 1401 data points from weekly historical report
+#   - Tolerance: ~2% for SoC, ~2C for temperature, near-zero for idle power
+#
+# Known discrepancies (registers not matching Solarman API):
+#   - Grid Reactive Power: 0x4F23 shows -5, API shows 26-35 Var
+#     API calculates: Q = P * sqrt(1 - pf^2) / pf (mean error 0.6Var)
+#     Use HA template sensor: solarman_grid_reactive_power_calc
+#   - Backup Load Power: 0x4F2D shows 0, API shows 1-9W
+#     API calculates: Backup = Load A-Phase Power - Battery Power (mean error 0.3W)
+#     Use HA template sensor: solarman_backup_load_power_calc
+#   - BMS Voltage: 0x28A0 shows ~326V, API shows ~318V (~8V offset)
+#     Different measurement points - PCS vs BMS internal
+#     Register value is correct for PCS side
+#   - BMS Current: 0x28A4 shows -0.10A, API shows 0.0A
+#     Solarman rounds near-zero values to 0.0A
+#     Register value is more accurate
+#   - Cell Voltages: 0x2B46-0x2B4A show ~30mV lower than API
+#     API: Max 3324-3335mV, Min 3317-3323mV
+#     Registers: 3292-3295mV
+#     Different calibration or measurement points
+#
+# Note: Cell Voltage Max/Min do not have dedicated registers.
+#       Use Home Assistant template sensors to compute max/min from individual cells.
+#
+# Rules (ha-solarman davidrapan fork):
+#   1 = uint16
+#   2 = signed int16
+#   3 = uint32 (two registers)
+#   4 = signed int32 (two registers)
+#   6 = bitmask/hex dump
+#   11 = float32 (CUSTOM - requires parser.py patch)
+
+info:
+  manufacturer: Hiconics
+  model: HEC2-S5.0Hr2
+
+default:
+  update_interval: 30
+  digits: 1
+  code: 4
+
+parameters:
+
+  # --- Grid (0x4F18-0x4F3F) ---
+  # Block layout (int16, code=4):
+  #   0x4F18-0x4F1B: zeros
+  #   0x4F1C: Load A-Phase Power (raw=2, matches API 2W)
+  #   0x4F1D: Total Consumption Power (raw=2, matches API 2W)
+  #   0x4F1E-0x4F1F: non-zero, unknown
+  #   0x4F20: Grid Phase-A Power (raw=21-24, matches API 20-28W)
+  #   0x4F21: Grid Frequency (raw=4997-5000, API 49.97-50.00Hz)
+  #   0x4F22: Grid Voltage (raw=2259-2292, API 225.9-229.2V)
+  #   0x4F23: Grid Reactive Power (raw=-5, DOES NOT MATCH API 26-35Var)
+  #   0x4F24: Load Reactive Power (raw=-25, unknown if matches API)
+  #   0x4F25: Load Frequency (raw=4997-5000, API 49.97-50.00Hz)
+  #   0x4F26: AC Real Power (raw=-24 to -28, matches API -24 to -28W)
+  #   0x4F27: DC Bus Voltage (raw=3798, API 379.8V)
+  #   0x4F28: Inverter Output Phase A Voltage (raw=2300, API 230.0V)
+  #   0x4F29: Inverter Output Phase A Frequency (raw=5000, API 50.00Hz)
+  #   0x4F2A: unknown (raw=5000)
+  #   0x4F2B: Grid Active Power (raw=217, API 21.7W, scale=0.1)
+  #   0x4F2C: Battery Power (raw=0, matches API 0W)
+  #   0x4F2D: Backup Load Power (raw=0, DOES NOT MATCH API 1-9W)
+  #   0x4F2E-0x4F2F: zeros
+  #   0x4F30: Load Voltage A (raw=2249-2253, API 224.9-225.3V)
+  #   0x4F31: Load Phase A Current (raw=7, API 0.07A)
+  #   0x4F32: unknown (raw=4400)
+  #   0x4F33: Load Voltage B (raw=2228, API 222.8V)
+  #   0x4F34-0x4F36: Energy counters (non-zero, scale unconfirmed)
+  #   0x4F37-0x4F5F: zeros
+  #   0x4F60: Daily Charging Energy (raw=2, API 2kWh max)
+  #   0x4F67: Backup Load Energy This Month (raw=2)
+  #   0x4F69: Backup Load Energy Total (raw=19)
+  #   0x4F6A: Daily Discharging Energy (raw=3, API 0kWh)
+  #   0x4F6B-0x4F7F: zeros
+  - group: Grid
+    items:
+      # 0x4F20: int16, scale=1.0, matches API 20-28W
+      - name: "Grid Phase-A Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        scale: 1.0
+        rule: 2
+        registers: [0x4F20]
+        icon: "mdi:transmission-tower"
+
+      # 0x4F21: int16, scale=0.01, matches API 49.97-50.00Hz
+      - name: "Grid Frequency"
+        class: "frequency"
+        state_class: "measurement"
+        uom: "Hz"
+        scale: 0.01
+        digits: 2
+        rule: 2
+        registers: [0x4F21]
+        icon: "mdi:sine-wave"
+
+      # 0x4F22: int16, scale=0.1, matches API 225.9-229.2V
+      - name: "Grid Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.1
+        rule: 2
+        registers: [0x4F22]
+        icon: "mdi:transmission-tower"
+
+      # 0x4F25: int16, scale=0.01, matches API 49.97-50.00Hz
+      - name: "Load Frequency"
+        class: "frequency"
+        state_class: "measurement"
+        uom: "Hz"
+        scale: 0.01
+        digits: 2
+        rule: 2
+        registers: [0x4F25]
+        icon: "mdi:sine-wave"
+
+      # 0x4F26: int16, scale=1.0, matches API -24 to -28W
+      - name: "AC Real Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        scale: 1.0
+        rule: 2
+        registers: [0x4F26]
+        icon: "mdi:lightning-bolt"
+
+      # 0x4F27: int16, scale=0.1, matches API 379.8V
+      - name: "DC Bus Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.1
+        rule: 2
+        registers: [0x4F27]
+        icon: "mdi:current-dc"
+
+      # 0x4F28: int16, scale=0.1, matches API 230.0V
+      - name: "Inverter Output Phase A Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.1
+        rule: 2
+        registers: [0x4F28]
+        icon: "mdi:current-ac"
+
+      # 0x4F29: int16, scale=0.01, matches API 50.00Hz
+      - name: "Inverter Output Phase A Frequency"
+        class: "frequency"
+        state_class: "measurement"
+        uom: "Hz"
+        scale: 0.01
+        digits: 2
+        rule: 2
+        registers: [0x4F29]
+        icon: "mdi:sine-wave"
+
+      # 0x4F2B: int16, scale=0.1, raw=217 -> 21.7W, matches API
+      - name: "Grid Active Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        scale: 0.1
+        rule: 2
+        registers: [0x4F2B]
+        icon: "mdi:transmission-tower"
+
+      # 0x4F2B: int16, scale=0.1, DUPLICATE of Grid Active Power (same register)
+      # API exposes both with identical values (~23W)
+      - name: "Total Grid Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        scale: 0.1
+        rule: 2
+        registers: [0x4F2B]
+        icon: "mdi:transmission-tower"
+
+      # 0x4F23: int16, scale=1.0, raw=-5, DOES NOT MATCH API (26-35Var)
+      # API calculates: Q = P * sqrt(1 - pf^2) / pf
+      # Mean error 0.6Var, max error 4.5Var
+      # Use template sensor: solarman_grid_reactive_power_calc
+      - name: "Grid Reactive Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "Var"
+        scale: 1.0
+        rule: 2
+        registers: [0x4F23]
+        icon: "mdi:transmission-tower"
+
+      # 0x4F24: int16, scale=1.0, raw=-25, unknown if matches API
+      - name: "Load Reactive Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "Var"
+        scale: 1.0
+        rule: 2
+        registers: [0x4F24]
+        icon: "mdi:transmission-tower"
+
+      # 0x4F2C: int16, scale=1.0, raw=0, matches API 0W
+      - name: "Battery Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        scale: 1.0
+        rule: 2
+        registers: [0x4F2C]
+        icon: "mdi:battery"
+
+      # 0x4F1D: int16, scale=1.0, raw=2, matches API 2W
+      - name: "Total Consumption Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        scale: 1.0
+        rule: 2
+        registers: [0x4F1D]
+        icon: "mdi:home-lightning-bolt"
+
+      # 0x4F2D: int16, scale=1.0, raw=0, DOES NOT MATCH API (1-9W)
+      # API calculates: Backup = Load A-Phase Power - Battery Power
+      # Mean error 0.3W
+      # Use template sensor: solarman_backup_load_power_calc
+      - name: "Backup Load Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        scale: 1.0
+        rule: 2
+        registers: [0x4F2D]
+        icon: "mdi:backup-restore"
+
+  # --- Load (0x4F30-0x4F33) ---
+  #   0x4F30: Load Voltage A (raw=2249-2253, scale=0.1 -> 224.9-225.3V)
+  #   0x4F31: Grid Phase-A Current (raw=7, scale=0.01 -> 0.07A, API 0.1A)
+  #   0x4F32: unknown (raw=4400)
+  #   0x4F33: Load Voltage B (raw=2228, scale=0.1 -> 222.8V)
+  # Note: Load Phase A Current has no dedicated register.
+  #       API shows 0.0A (mean 0.001A, max 0.2A) - rounds small values.
+  #       Use template sensor: solarman_load_phase_a_current_calc (I = P/V)
+  - group: Load
+    items:
+      # 0x4F30: int16, scale=0.1, matches API 224.9-225.3V
+      - name: "Load Voltage A"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.1
+        rule: 2
+        registers: [0x4F30]
+        icon: "mdi:home-lightning-bolt"
+
+      # 0x4F31: int16, scale=0.01, raw=7 -> 0.07A, API Grid Phase-A Current 0.1A
+      # Note: This is Grid Phase-A Current, not Load Phase A Current
+      # Load Phase A Current has no dedicated register (API shows 0.0A)
+      - name: "Grid Phase-A Current"
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 0.01
+        rule: 2
+        registers: [0x4F31]
+        icon: "mdi:transmission-tower"
+
+      # 0x4F33: int16, scale=0.1, matches API 222.8V
+      - name: "Load Voltage B"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.1
+        rule: 2
+        registers: [0x4F33]
+        icon: "mdi:home-lightning-bolt"
+
+  # --- Energy (0x4F34-0x4F36) ---
+  #   0x4F34: raw=9733, scale=0.1 -> 973.3 (unit unconfirmed)
+  #   0x4F35: raw=8728, scale=0.1 -> 872.8 (unit unconfirmed)
+  #   0x4F36: raw=6176, scale=0.1 -> 617.6 (unit unconfirmed)
+  # NOTE: Scale unconfirmed - may be Wh instead of kWh
+  - group: Energy
+    items:
+      - name: "Energy Counter A"
+        class: "energy"
+        state_class: "total_increasing"
+        uom: "kWh"
+        scale: 0.1
+        rule: 2
+        registers: [0x4F34]
+        icon: "mdi:counter"
+
+      - name: "Energy Counter B"
+        class: "energy"
+        state_class: "total_increasing"
+        uom: "kWh"
+        scale: 0.1
+        rule: 2
+        registers: [0x4F35]
+        icon: "mdi:counter"
+
+      - name: "Energy Counter C"
+        class: "energy"
+        state_class: "total_increasing"
+        uom: "kWh"
+        scale: 0.1
+        rule: 2
+        registers: [0x4F36]
+        icon: "mdi:counter"
+
+  # --- Daily Energy (0x4F1C, 0x4F60-0x4F6F) ---
+  #   0x4F1C: Load A-Phase Power (raw=2, scale=1.0 -> 2W, matches API)
+  #   0x4F60: Daily Charging Energy (raw=2, scale=1.0 -> 2kWh, matches API max)
+  #   0x4F67: Backup Load Energy This Month (raw=2)
+  #   0x4F69: Backup Load Energy Total (raw=19)
+  #   0x4F6A: Daily Discharging Energy (raw=3, scale=1.0 -> 3kWh)
+  - group: Daily Energy
+    items:
+      # 0x4F1C: int16, scale=1.0, matches API 2W
+      - name: "Load A-Phase Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        scale: 1.0
+        rule: 2
+        registers: [0x4F1C]
+        icon: "mdi:home-lightning-bolt"
+
+      # 0x4F60: int16, scale=1.0, matches API 0-2kWh
+      - name: "Daily Charging Energy"
+        class: "energy"
+        state_class: "total_increasing"
+        uom: "kWh"
+        scale: 1.0
+        rule: 2
+        registers: [0x4F60]
+        icon: "mdi:battery-charging"
+
+      # 0x4F6A: int16, scale=1.0, raw=3, API shows 0kWh (may reset daily)
+      - name: "Daily Discharging Energy"
+        class: "energy"
+        state_class: "total_increasing"
+        uom: "kWh"
+        scale: 1.0
+        rule: 2
+        registers: [0x4F6A]
+        icon: "mdi:battery-charging"
+
+      - name: "Backup Load Energy This Month"
+        class: "energy"
+        state_class: "total_increasing"
+        uom: "kWh"
+        scale: 1.0
+        rule: 2
+        registers: [0x4F67]
+        icon: "mdi:backup-restore"
+
+  # --- Backup Load Energy (0x4F69) ---
+  - group: Backup Energy
+    items:
+      - name: "Backup Load Energy Total"
+        class: "energy"
+        state_class: "total_increasing"
+        uom: "kWh"
+        scale: 1.0
+        rule: 2
+        registers: [0x4F69]
+        icon: "mdi:backup-restore"
+
+  # --- Battery (0x2818-0x2819, float32) ---
+  #   0x2818/0x2819: float32, scale=1.0, matches API 91-100%
+  - group: Battery
+    items:
+      # 0x2818/0x2819: float32, matches API 91-100%, ~2% tolerance
+      - name: "Battery SoC"
+        class: "battery"
+        state_class: "measurement"
+        uom: "%"
+        scale: 1.0
+        digits: 1
+        rule: 11
+        registers: [0x2818, 0x2819]
+        icon: "mdi:battery"
+
+  # --- BMS (0x2738-0x273B, 0x28A0-0x28A5, 0x28AA-0x28AD, float32) ---
+  #   0x28A0/0x28A1: BMS Voltage, float32, ~326V (API ~318V, ~8V offset)
+  #   0x28A4/0x28A5: BMS Current, float32, ~-0.10A (API 0.0A, rounding)
+  #   0x2738/0x2739: PCS Battery Port Voltage, float32, ~319V
+  #   0x273A/0x273B: PCS Battery Port Current, float32, ~0.02A
+  #   0x28AA/0x28AB: BMS Temperature, float32, matches API
+  #   0x28AC/0x28AD: BMS Temperature 2, float32, matches API
+  # Note: BMS Voltage differs from API by ~8V (different measurement point)
+  # Note: BMS Current shows small non-zero, API rounds to 0.0A
+  - group: BMS
+    items:
+      # 0x28A0/0x28A1: float32, ~326V, API ~318V (PCS vs BMS internal)
+      - name: "BMS Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 1.0
+        digits: 2
+        rule: 11
+        registers: [0x28A0, 0x28A1]
+        icon: "mdi:battery"
+
+      # 0x28A4/0x28A5: float32, ~-0.10A, API 0.0A (Solarman rounding)
+      - name: "BMS Current"
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 1.0
+        digits: 3
+        rule: 11
+        registers: [0x28A4, 0x28A5]
+        icon: "mdi:current-dc"
+
+      # 0x2738/0x2739: float32, ~319V, matches API PCS Battery Port Voltage
+      - name: "PCS Battery Port Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 1.0
+        digits: 2
+        rule: 11
+        registers: [0x2738, 0x2739]
+        icon: "mdi:current-dc"
+
+      # 0x273A/0x273B: float32, ~0.02A, matches API PCS Battery Port Current
+      - name: "PCS Battery Port Current"
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 1.0
+        digits: 3
+        rule: 11
+        registers: [0x273A, 0x273B]
+        icon: "mdi:current-dc"
+
+      # 0x28AA/0x28AB: float32, matches API BMS Temperature
+      - name: "BMS Temperature"
+        class: "temperature"
+        state_class: "measurement"
+        uom: "°C"
+        scale: 1.0
+        digits: 1
+        rule: 11
+        registers: [0x28AA, 0x28AB]
+        icon: "mdi:thermometer"
+
+      # 0x28AC/0x28AD: float32, matches API BMS Temperature 2
+      - name: "BMS Temperature 2"
+        class: "temperature"
+        state_class: "measurement"
+        uom: "°C"
+        scale: 1.0
+        digits: 1
+        rule: 11
+        registers: [0x28AC, 0x28AD]
+        icon: "mdi:thermometer"
+
+  # --- Temperature (0x2748-0x2751, 0x274A-0x274B, 0x2822-0x2823, 0x293E-0x293F, float32) ---
+  #   0x293E/0x293F: Power Factor, float32, ~0.60, matches API
+  #   0x2748/0x2749: Ambient Temperature, float32, matches API 26-31C
+  #   0x2822/0x2823: Battery Cell Temp Min, float32, matches API 14.8-17.4C
+  #   0x2750/0x2751: Battery Cell Temp Max, float32, matches API 16.3-18.9C
+  #   0x274C/0x274D: PV Temperature, float32, matches API 16-20C
+  #   0x274A/0x274B: PCS Temperature, float32, matches API 16-25C
+  - group: Temperature
+    items:
+      # 0x293E/0x293F: float32, ~0.60, matches API power factor
+      - name: "Power Factor"
+        class: "power_factor"
+        state_class: "measurement"
+        uom: null
+        scale: 1.0
+        digits: 2
+        rule: 11
+        registers: [0x293E, 0x293F]
+        icon: "mdi:cosine-wave"
+
+      # 0x2748/0x2749: float32, matches API 26-31C, ~2C tolerance
+      - name: "Ambient Temperature"
+        class: "temperature"
+        state_class: "measurement"
+        uom: "°C"
+        scale: 1.0
+        digits: 1
+        rule: 11
+        registers: [0x2748, 0x2749]
+        icon: "mdi:thermometer"
+
+      # 0x2822/0x2823: float32, matches API 14.8-17.4C
+      - name: "Battery Cell Temp Min"
+        class: "temperature"
+        state_class: "measurement"
+        uom: "°C"
+        scale: 1.0
+        digits: 1
+        rule: 11
+        registers: [0x2822, 0x2823]
+        icon: "mdi:thermometer"
+
+      # 0x2750/0x2751: float32, matches API 16.3-18.9C
+      - name: "Battery Cell Temp Max"
+        class: "temperature"
+        state_class: "measurement"
+        uom: "°C"
+        scale: 1.0
+        digits: 1
+        rule: 11
+        registers: [0x2750, 0x2751]
+        icon: "mdi:thermometer"
+
+      # 0x274C/0x274D: float32, matches API 16-20C
+      - name: "PV Temperature"
+        class: "temperature"
+        state_class: "measurement"
+        uom: "°C"
+        scale: 1.0
+        digits: 1
+        rule: 11
+        registers: [0x274C, 0x274D]
+        icon: "mdi:thermometer"
+
+      # 0x274A/0x274B: float32, matches API 16-25C
+      - name: "PCS Temperature"
+        class: "temperature"
+        state_class: "measurement"
+        uom: "°C"
+        scale: 1.0
+        digits: 1
+        rule: 11
+        registers: [0x274A, 0x274B]
+        icon: "mdi:thermometer"
+
+  # --- PV (0x2720-0x273F, float32 block) ---
+  #   0x272C/0x272D: PV1 Voltage, float32, ~37.7V, matches API
+  #   0x2722/0x2723: PV1 Current, float32, ~0.005A, matches API 0.0A
+  #   0x2724/0x2725: PV1 Power, float32, ~0.14W, API shows 0W (near-zero)
+  #   0x2732/0x2733: PV2 Voltage, float32, ~37.9V, matches API
+  #   0x2730/0x2731: PV2 Current, float32, ~0.0A, matches API
+  #   0x2734/0x2735: PV2 Power, float32, ~0.01W, matches API 0W
+  - group: PV
+    items:
+      # 0x272C/0x272D: float32, ~37.7V, matches API DC Voltage PV1
+      - name: "PV1 Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 1.0
+        digits: 2
+        rule: 11
+        registers: [0x272C, 0x272D]
+        icon: "mdi:solar-panel"
+
+      # 0x2722/0x2723: float32, ~0.005A, matches API 0.0A
+      - name: "PV1 Current"
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 1.0
+        digits: 3
+        rule: 11
+        registers: [0x2722, 0x2723]
+        icon: "mdi:solar-panel"
+
+      # 0x2724/0x2725: float32, ~0.14W, API shows 0W (near-zero, acceptable)
+      - name: "PV1 Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        scale: 1.0
+        digits: 1
+        rule: 11
+        registers: [0x2724, 0x2725]
+        icon: "mdi:solar-panel"
+
+      # 0x2732/0x2733: float32, ~37.9V, matches API DC Voltage PV2
+      - name: "PV2 Voltage"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 1.0
+        digits: 2
+        rule: 11
+        registers: [0x2732, 0x2733]
+        icon: "mdi:solar-panel"
+
+      # 0x2730/0x2731: float32, ~0.0A, matches API DC Current PV2
+      - name: "PV2 Current"
+        class: "current"
+        state_class: "measurement"
+        uom: "A"
+        scale: 1.0
+        digits: 3
+        rule: 11
+        registers: [0x2730, 0x2731]
+        icon: "mdi:solar-panel"
+
+      # 0x2734/0x2735: float32, ~0.01W, matches API 0W
+      - name: "PV2 Power"
+        class: "power"
+        state_class: "measurement"
+        uom: "W"
+        scale: 1.0
+        digits: 1
+        rule: 11
+        registers: [0x2734, 0x2735]
+        icon: "mdi:solar-panel"
+
+  # --- Cells (0x2B36-0x2B4A, uint16) ---
+  #   0x2B36: Battery SoH, uint16, scale=0.1, raw=1009 -> 100.9%, matches API
+  #   0x2B46-0x2B4A: Cell Voltages 1-5, uint16, scale=0.001
+  #     API shows Max 3324-3335mV, Min 3317-3323mV
+  #     Registers show 3292-3295mV (~30mV lower)
+  #     Use template sensors for Cell Voltage Max/Min/Spread
+  - group: Cells
+    items:
+      # 0x2B36: uint16, scale=0.1, raw=1009 -> 100.9%, matches API
+      - name: "Battery SoH"
+        class: "battery"
+        state_class: "measurement"
+        uom: "%"
+        scale: 0.1
+        digits: 1
+        rule: 1
+        registers: [0x2B36]
+        icon: "mdi:battery-heart"
+
+      # 0x2B46: uint16, scale=0.001, ~3292mV, API ~3320mV (~30mV offset)
+      - name: "Battery Cell Voltage 1"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.001
+        digits: 3
+        rule: 1
+        registers: [0x2B46]
+        icon: "mdi:battery"
+
+      # 0x2B47: uint16, scale=0.001, ~3293mV, API ~3321mV (~30mV offset)
+      - name: "Battery Cell Voltage 2"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.001
+        digits: 3
+        rule: 1
+        registers: [0x2B47]
+        icon: "mdi:battery"
+
+      # 0x2B48: uint16, scale=0.001, ~3294mV, API ~3322mV (~30mV offset)
+      - name: "Battery Cell Voltage 3"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.001
+        digits: 3
+        rule: 1
+        registers: [0x2B48]
+        icon: "mdi:battery"
+
+      # 0x2B49: uint16, scale=0.001, ~3295mV, API ~3323mV (~30mV offset)
+      - name: "Battery Cell Voltage 4"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.001
+        digits: 3
+        rule: 1
+        registers: [0x2B49]
+        icon: "mdi:battery"
+
+      # 0x2B4A: uint16, scale=0.001, ~3295mV, API ~3324mV (~30mV offset)
+      - name: "Battery Cell Voltage 5"
+        class: "voltage"
+        state_class: "measurement"
+        uom: "V"
+        scale: 0.001
+        digits: 3
+        rule: 1
+        registers: [0x2B4A]
+        icon: "mdi:battery"

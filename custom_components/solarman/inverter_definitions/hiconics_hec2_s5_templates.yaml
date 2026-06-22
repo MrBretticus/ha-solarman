@@ -1,0 +1,106 @@
+# Hiconics HEC2-S5.0Hr2 - Template Sensors
+#
+# Add to your Home Assistant configuration.yaml or a separate template.yaml file.
+# These sensors replicate Solarman API values that are computed from multiple registers,
+# not read directly from the inverter.
+#
+# Validated against 1401 data points from weekly historical report (June 2026).
+
+template:
+  - sensor:
+      # Grid Reactive Power: Q = P * sqrt(1 - pf^2) / pf
+      # Validated: mean error 0.6Var, max error 4.5Var
+      # Requires: sensor.hiconics_inverter_grid_active_power, sensor.hiconics_inverter_power_factor
+      - name: "Hiconics Inverter Grid Reactive Power Calc"
+        unique_id: hiconics_inverter_grid_reactive_power_calc
+        unit_of_measurement: "Var"
+        state_class: "measurement"
+        device_class: "reactive_power"
+        state: >
+          {% set p = states('sensor.hiconics_inverter_grid_active_power') | float(0) %}
+          {% set pf = states('sensor.hiconics_inverter_power_factor') | float(0.6) %}
+          {% if pf > 0 and pf <= 1 %}
+            {{ (p * (1 - pf**2)**0.5 / pf) | round(1) }}
+          {% else %}
+            0
+          {% endif %}
+
+      # Backup Load Power: Load A-Phase Power - Battery Power
+      # Validated: mean error 0.3W
+      # Requires: sensor.hiconics_inverter_load_a_phase_power, sensor.hiconics_inverter_battery_power
+      - name: "Hiconics Inverter Backup Load Power Calc"
+        unique_id: hiconics_inverter_backup_load_power_calc
+        unit_of_measurement: "W"
+        state_class: "measurement"
+        device_class: "power"
+        state: >
+          {% set load = states('sensor.hiconics_inverter_load_a_phase_power') | float(0) %}
+          {% set battery = states('sensor.hiconics_inverter_battery_power') | float(0) %}
+          {{ (load - battery) | round(1) }}
+
+      # Load Phase A Current: I = P / V
+      # API rounds to 0.0A for small values (mean 0.001A, max 0.2A)
+      # This template gives the actual calculated value (mean ~0.02A)
+      # Requires: sensor.hiconics_inverter_load_a_phase_power, sensor.hiconics_inverter_load_voltage_a
+      - name: "Hiconics Inverter Load Phase A Current Calc"
+        unique_id: hiconics_inverter_load_phase_a_current_calc
+        unit_of_measurement: "A"
+        state_class: "measurement"
+        device_class: "current"
+        state: >
+          {% set p = states('sensor.hiconics_inverter_load_a_phase_power') | float(0) %}
+          {% set v = states('sensor.hiconics_inverter_load_voltage_a') | float(230) %}
+          {% if v > 0 %}
+            {{ (p / v) | round(3) }}
+          {% else %}
+            0
+          {% endif %}
+
+      # Cell Voltage Max: max of individual cell voltages
+      # API shows 3324-3335mV, registers show ~30mV lower
+      # Requires: sensor.hiconics_inverter_battery_cell_voltage_1 through _5
+      - name: "Hiconics Inverter Cell Voltage Max"
+        unique_id: hiconics_inverter_cell_voltage_max
+        unit_of_measurement: "V"
+        state_class: "measurement"
+        device_class: "voltage"
+        state: >
+          {{ [
+            states('sensor.hiconics_inverter_battery_cell_voltage_1') | float(0),
+            states('sensor.hiconics_inverter_battery_cell_voltage_2') | float(0),
+            states('sensor.hiconics_inverter_battery_cell_voltage_3') | float(0),
+            states('sensor.hiconics_inverter_battery_cell_voltage_4') | float(0),
+            states('sensor.hiconics_inverter_battery_cell_voltage_5') | float(0)
+          ] | max | round(3) }}
+
+      # Cell Voltage Min: min of individual cell voltages
+      - name: "Hiconics Inverter Cell Voltage Min"
+        unique_id: hiconics_inverter_cell_voltage_min
+        unit_of_measurement: "V"
+        state_class: "measurement"
+        device_class: "voltage"
+        state: >
+          {{ [
+            states('sensor.hiconics_inverter_battery_cell_voltage_1') | float(0),
+            states('sensor.hiconics_inverter_battery_cell_voltage_2') | float(0),
+            states('sensor.hiconics_inverter_battery_cell_voltage_3') | float(0),
+            states('sensor.hiconics_inverter_battery_cell_voltage_4') | float(0),
+            states('sensor.hiconics_inverter_battery_cell_voltage_5') | float(0)
+          ] | min | round(3) }}
+
+      # Cell Voltage Spread: max - min (battery health indicator)
+      # Healthy spread: <10mV
+      - name: "Hiconics Inverter Cell Voltage Spread"
+        unique_id: hiconics_inverter_cell_voltage_spread
+        unit_of_measurement: "V"
+        state_class: "measurement"
+        device_class: "voltage"
+        state: >
+          {% set cells = [
+            states('sensor.hiconics_inverter_battery_cell_voltage_1') | float(0),
+            states('sensor.hiconics_inverter_battery_cell_voltage_2') | float(0),
+            states('sensor.hiconics_inverter_battery_cell_voltage_3') | float(0),
+            states('sensor.hiconics_inverter_battery_cell_voltage_4') | float(0),
+            states('sensor.hiconics_inverter_battery_cell_voltage_5') | float(0)
+          ] %}
+          {{ (cells | max - cells | min) | round(3) }}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import bisect
+import struct
 
 from logging import getLogger
 from datetime import datetime
@@ -171,6 +172,8 @@ class ParameterParser:
                                 self.try_parse_time(data, i)
                             case 10:
                                 self.try_parse_raw(data, i)
+                            case 11:
+                                self.try_parse_float(data, i)
                     except Exception as e:
                         _LOGGER.error(f"ParameterParser.try_parse: data: {data}, definition: {i} [{strepr(e)}]")
                         raise
@@ -439,6 +442,34 @@ class ParameterParser:
                     value += ":"
 
         self.set_state(definition["key"], value)
+
+    def try_parse_float(self, data, definition):
+        code = get_code(definition, "read")
+        value = 0
+        shift = 0
+
+        for r in definition["registers"]:
+            if (temp := get_addr_value(data, code, r)) is None:
+                return
+
+            value += (temp & 0xFFFF) << shift
+            shift += 16
+
+        packed = struct.pack(">I", value)
+        fvalue = struct.unpack(">f", packed)[0]
+
+        if (range := definition.get("range")) and not self.in_range(definition["key"], fvalue, range):
+            if (default := range.get("default")) is None:
+                return
+            fvalue = default
+
+        if (scale := definition.get("scale")) is not None:
+            fvalue *= scale
+
+        if (offset := definition.get("offset")) is not None:
+            fvalue -= offset
+
+        self.set_state(definition["key"], get_number(fvalue, get_or_def(definition, DIGITS, self._digits)))
 
     def try_parse_raw(self, data, definition):
         code = get_code(definition, "read")
